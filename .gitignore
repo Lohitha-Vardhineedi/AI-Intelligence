@@ -1,0 +1,36 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Models, sample data, uploads and run outputs (downloaded or generated)
+backend/models/
+backend/data/
+backend/output/
+backend/storage/
+*.pt
+*.onnx
+*.mp4
+*.avi
+
+# Frontend
+node_modules/
+.next/
+next-env.d.ts
+# Written by next dev for AI coding assistants
+frontend/AGENTS.md
+frontend/CLAUDE.md
+*.tsbuildinfo
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

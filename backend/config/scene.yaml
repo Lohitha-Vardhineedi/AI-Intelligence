@@ -1,0 +1,88 @@
+# ---------------------------------------------------------------------------------------
+# Scene configuration: camera, detection settings, zones, lines and alert rules.
+#
+# Coordinates are fractions of the frame: x = 0 (left) to 1 (right),
+# y = 0 (top) to 1 (bottom). Run `python -m scripts.preview_scene` to see them drawn
+# on a frame with a grid, then adjust.
+#
+# SMS recipients come from SMS_RECIPIENTS in .env (kept out of this file and out of git).
+# ---------------------------------------------------------------------------------------
+
+camera:
+  id: cctv-01
+  name: CCTV Camera 01
+  location: Building A / Room 101
+
+detection:
+  # COCO class names or groups: person, vehicle, animal, bag. Empty list = all 80 classes.
+  classes: [person, vehicle, animal, bag]
+  confidence_threshold: 0.4   # leave out to use AI_CONFIDENCE_THRESHOLD from .env
+  class_confidence:           # stricter thresholds for classes prone to false alarms
+    animal: 0.6               # the sample's rock on the grass otherwise looks like a "dog"
+  inference_fps: 10           # analyse up to 10 frames per second
+  # frame_skip: 1             # video files only: analyse every 2nd frame instead
+
+tracking:
+  min_hits: 3                 # frames an object must be seen before it is counted
+  lost_timeout_seconds: 1.5   # keep the same ID through short occlusions
+  reference_point: bottom_center
+
+zones:
+  - id: room-101
+    name: Room 101
+    type: RESTRICTED          # RESTRICTED | SAFE | ENTRY | EXIT | PARKING | CROWDED | CUSTOM
+    classes: [person]         # which objects this zone watches
+    allowed_classes: []       # nobody is allowed: any person entering is an intrusion
+    severity: CRITICAL
+    max_dwell_seconds: 30     # LOITERING_DETECTED after 30 s inside
+    max_people: 5             # CROWD_DETECTED if more than 5 people inside
+    points:                   # polygon (on the sample video: road right of the lamp post)
+      - [0.58, 0.28]
+      - [0.88, 0.17]
+      - [0.99, 0.20]
+      - [0.99, 0.80]
+      - [0.58, 0.62]
+
+lines:
+  - id: entrance
+    name: Entrance Line
+    # IN = crossing from the left of start->end to its right. Drawn bottom->top here,
+    # so IN = walking left-to-right into Room 101.
+    start: [0.56, 0.72]
+    end: [0.56, 0.26]
+    direction: BOTH           # IN | OUT | BOTH
+    classes: [person]
+
+crowd:                        # whole-frame crowd threshold
+  max_people: 8
+  min_duration_seconds: 3
+
+privacy_masks: []             # e.g. - {name: window, points: [[0.1,0.1],[0.2,0.1],[0.2,0.2]]}
+
+rules:
+  - id: room-101-intrusion
+    name: Person entering Room 101
+    event_types: [INTRUSION_DETECTED]
+    zones: [room-101]
+    object_classes: [person]
+    min_confidence: 0.5
+    severity: CRITICAL
+    actions: {sms: true, snapshot: true}
+    cooldown_seconds: 60      # same zone within 60 s -> no repeat SMS
+    dedup_scope: zone
+    # schedule: {days: [MON, TUE, WED, THU, FRI], start: "19:00", end: "07:00"}
+
+  - id: room-101-loitering
+    name: Loitering in Room 101
+    event_types: [LOITERING_DETECTED]
+    zones: [room-101]
+    severity: MEDIUM
+    actions: {sms: false, snapshot: true}
+
+  - id: crowd
+    name: Crowd threshold exceeded
+    event_types: [CROWD_DETECTED]
+    severity: MEDIUM
+    actions: {sms: false, snapshot: true}
+    cooldown_seconds: 120
+    dedup_scope: camera

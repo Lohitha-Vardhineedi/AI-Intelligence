@@ -1,0 +1,65 @@
+# Render Blueprint. In the Render dashboard: New > Blueprint, then pick this repository.
+#
+# Everything here is on Render's free plan:
+# - The API sleeps after 15 minutes without traffic (the first request then takes about
+#   a minute) and loses uploaded files whenever it restarts.
+# - The free Postgres database is deleted 30 days after it is created.
+# - The API gets a small share of one CPU, so analysis is slow (estimated at about one
+#   video frame per second).
+#
+# The service URLs below assume Render keeps the service names as given. If it adds a
+# suffix, update CORS_ORIGINS and NEXT_PUBLIC_API_URL to the real URLs and redeploy.
+
+databases:
+  - name: ai-intelligence-db
+    plan: free
+    region: singapore
+    databaseName: ai_video
+    user: ai_video
+
+services:
+  - type: web
+    name: lohitha-ai-intelligence-api
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerContext: ./backend
+    dockerfilePath: ./backend/Dockerfile
+    healthCheckPath: /api/v1/health
+    buildFilter:
+      paths:
+        - backend/**
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ai-intelligence-db
+          property: connectionString
+      - key: CORS_ORIGINS
+        value: https://lohitha-ai-intelligence-web.onrender.com
+      - key: AI_IMAGE_SIZE
+        value: "416"  # 4x faster than 640 with nearly the same results
+      - key: AI_CPU_THREADS
+        value: "1"
+      - key: MAX_UPLOAD_MB
+        value: "100"
+      - key: FORGET_MISSING_VIDEOS
+        value: "true"  # the free plan's disk is wiped on restart
+      - key: SMS_PROVIDER
+        value: console  # SMS text appears in the service logs
+
+  - type: web
+    name: lohitha-ai-intelligence-web
+    runtime: node
+    plan: free
+    region: singapore
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start
+    buildFilter:
+      paths:
+        - frontend/**
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NEXT_PUBLIC_API_URL
+        value: https://lohitha-ai-intelligence-api.onrender.com

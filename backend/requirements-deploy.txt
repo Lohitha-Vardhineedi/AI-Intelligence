@@ -1,0 +1,19 @@
+# API container (see Dockerfile). YOLO runs through ONNX Runtime instead of PyTorch and
+# Ultralytics, so the API fits in 512 MB of memory.
+onnxruntime>=1.18
+opencv-python-headless>=4.10
+numpy>=2.0
+
+pydantic>=2.7,<3
+pydantic-settings>=2.3,<3
+PyYAML>=6.0
+httpx>=0.27,<1
+tzdata>=2024.1
+
+fastapi>=0.115
+uvicorn>=0.30
+python-multipart>=0.0.9
+SQLAlchemy[asyncio]>=2.0
+alembic>=1.13
+psycopg[binary]>=3.2
+aiosqlite>=0.20
