@@ -92,7 +92,7 @@ def test_crowd_detected_once_per_episode():
 
 
 def test_weak_detections_alone_never_confirm_an_object():
-    """A rock flickering as 'dog' at 20-30% confidence must not be counted."""
+    """E.g. a rock that flickers as a 'dog' at 20-30% confidence."""
     detector = EventDetector(scene(), UTC, confirm_threshold=0.4)
     frames = [[tracked(9, 0.2, 0.3, "dog", conf=0.45)]] + [
         [tracked(9, 0.2, 0.3, "dog", conf=0.25)] for _ in range(30)

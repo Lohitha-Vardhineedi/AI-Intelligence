@@ -1,10 +1,10 @@
-"""Outputs: annotated video, evidence snapshots and the event log (§15, §32, §62)."""
+"""Run outputs: annotated video, evidence snapshots and the event log."""
 
 from __future__ import annotations
 
 import json
 import logging
-import threading
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -15,23 +15,27 @@ from app.events.types import Event
 
 logger = logging.getLogger(__name__)
 
+# H.264 plays in browsers; MPEG-4 Part 2 is the fallback. pip builds of OpenCV can't
+# encode H.264 through FFmpeg, but Windows has an encoder built in (Media Foundation).
+_WRITER_BACKENDS = (
+    ((cv2.CAP_MSMF, "avc1"),) if sys.platform == "win32" else ()
+) + ((cv2.CAP_FFMPEG, "avc1"), (cv2.CAP_FFMPEG, "mp4v"))
+
 
 class AnnotatedVideoWriter:
-    """Writes MP4. Tries H.264 first (plays in browsers), then MPEG-4 Part 2."""
-
     def __init__(self, path: Path, fps: float, size: tuple[int, int]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self._writer: cv2.VideoWriter | None = None
-        for codec in ("avc1", "mp4v"):
-            writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*codec), fps, size)
+        for backend, codec in _WRITER_BACKENDS:
+            writer = cv2.VideoWriter(str(path), backend, cv2.VideoWriter_fourcc(*codec), fps, size)
             if writer.isOpened():
-                self._writer, self.codec = writer, codec
+                self._writer = writer
+                logger.info("Writing annotated video %s (codec %s)", path.name, codec)
                 break
             writer.release()
         if self._writer is None:
-            raise RuntimeError(f"Could not create video writer for {path}")
-        logger.info("Writing annotated video %s (codec %s)", path.name, self.codec)
+            raise RuntimeError(f"Could not create a video writer for {path}")
 
     def write(self, image: np.ndarray) -> None:
         if self._writer is not None:
@@ -44,7 +48,7 @@ class AnnotatedVideoWriter:
 
 
 class SnapshotStore:
-    """Saves an evidence JPEG for an event, with the object highlighted."""
+    """Saves an evidence JPEG for an event, with the object outlined."""
 
     def __init__(self, directory: Path) -> None:
         self._dir = directory
@@ -62,10 +66,10 @@ class SnapshotStore:
         cv2.rectangle(evidence, (0, 0), (evidence.shape[1], 30), (0, 0, 0), -1)
         cv2.putText(evidence, caption, (8, 21), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
                     (255, 255, 255), 1, cv2.LINE_AA)
+        track = event.track_id if event.track_id is not None else "na"
         name = (
             f"{event.occurred_at:%Y%m%d_%H%M%S}_{event.event_type.value.lower()}"
-            f"_t{event.track_id if event.track_id is not None else 'na'}"
-            f"_{event.event_id[-6:]}.jpg"
+            f"_t{track}_{event.event_id[-6:]}.jpg"
         )
         path = self._dir / name
         cv2.imwrite(str(path), evidence)
@@ -73,19 +77,15 @@ class SnapshotStore:
 
 
 class EventLogWriter:
-    """Appends every event as one JSON line (events.jsonl)."""
+    """One JSON object per line (events.jsonl), line-buffered so it can be tailed live."""
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        self._lock = threading.Lock()
-        self._file = path.open("w", encoding="utf-8")
+        self._file = path.open("w", encoding="utf-8", buffering=1)
 
     def write(self, record: dict[str, Any]) -> None:
-        with self._lock:
-            self._file.write(json.dumps(record, default=str) + "\n")
-            self._file.flush()
+        self._file.write(json.dumps(record, default=str) + "\n")
 
     def close(self) -> None:
-        with self._lock:
-            self._file.close()
+        self._file.close()

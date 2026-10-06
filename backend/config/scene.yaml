@@ -20,7 +20,7 @@ detection:
   class_confidence:           # stricter thresholds for classes prone to false alarms
     animal: 0.6               # the sample's rock on the grass otherwise looks like a "dog"
   inference_fps: 10           # analyse up to 10 frames per second
-  # frame_skip: 1             # alternative: analyse every 2nd frame
+  # frame_skip: 1             # video files only: analyse every 2nd frame instead
 
 tracking:
   min_hits: 3                 # frames an object must be seen before it is counted

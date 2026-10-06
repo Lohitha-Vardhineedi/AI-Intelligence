@@ -1,14 +1,23 @@
-# Core AI / video engine
-ultralytics>=8.4,<9          # YOLO object detection (AGPL-3.0: fine for personal use)
-opencv-python>=4.10          # video decoding, drawing, encoding
-numpy>=2.0                   # also powers the built-in ByteTrack tracker
+ultralytics>=8.4,<9          # YOLO detection (AGPL-3.0, see README)
+opencv-python>=4.10          # video decoding, drawing and encoding
+numpy>=2.0                   # tracker, Kalman filter, geometry
 
-# Configuration, validation, HTTP
 pydantic>=2.7,<3
 pydantic-settings>=2.3,<3
 PyYAML>=6.0
-httpx>=0.27,<1               # SMS provider APIs (Twilio, MSG91)
-tzdata>=2024.1               # time-zone database (required on Windows)
+httpx>=0.27,<1               # Twilio and MSG91 APIs, sample video download
+tzdata>=2024.1               # time zone data on Windows
 
-# Optional - only if SMS_PROVIDER=aws_sns:
+# API, database and background jobs
+fastapi>=0.115
+uvicorn>=0.30
+python-multipart>=0.0.9      # file uploads
+SQLAlchemy[asyncio]>=2.0
+alembic>=1.13
+aiosqlite>=0.20              # SQLite, the zero-setup default database
+psycopg[binary]>=3.2         # PostgreSQL
+celery>=5.4
+redis>=5.0
+
+# Only for SMS_PROVIDER=aws_sns:
 # boto3>=1.34

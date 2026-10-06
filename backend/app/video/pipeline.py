@@ -1,8 +1,5 @@
-"""Video processing pipeline (§9, §62):
-
-source -> sampling -> privacy masks -> detection -> tracking -> event detection
-       -> rules / alerts / notifications -> annotation -> outputs
-"""
+"""source -> privacy mask -> detection -> tracking -> scene events -> rules, alerts, SMS
+-> annotation -> outputs"""
 
 from __future__ import annotations
 
@@ -10,8 +7,9 @@ import logging
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -19,24 +17,31 @@ import cv2
 
 from app.ai.detector import DetectionModel
 from app.ai.tracker import ObjectTracker
+from app.ai.types import Frame
 from app.events.detector import EventDetector, FrameAnalysis
-from app.events.geometry import Point
 from app.events.processor import EventProcessor
 from app.events.types import Alert, Event, EventType
 from app.video.annotator import FrameAnnotator
-from app.video.processor import FrameSampler, apply_privacy_masks
+from app.video.privacy import PrivacyMask
 from app.video.sources import VideoSource
 from app.video.writer import AnnotatedVideoWriter, EventLogWriter
 
 logger = logging.getLogger(__name__)
 
 _WINDOW = "AI Video Intelligence  (press Q to quit)"
+_QUIET_EVENTS = frozenset({EventType.PERSON_DETECTED, EventType.OBJECT_DETECTED})
+
+
+class RunStatus(StrEnum):
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"  # a file run stopped early
+    STOPPED = "STOPPED"  # a live run stopped
 
 
 @dataclass(slots=True)
 class PipelineProgress:
     frames_read: int
-    frames_processed: int
     total_frames: int | None
     processing_fps: float
     elapsed_s: float
@@ -60,7 +65,7 @@ class PipelineProgress:
 class RunSummary:
     source: str
     is_live: bool
-    status: str = "COMPLETED"
+    status: RunStatus = RunStatus.COMPLETED
     error: str | None = None
     frames_read: int = 0
     frames_processed: int = 0
@@ -72,14 +77,13 @@ class RunSummary:
     zone_counts: dict[str, dict[str, int]] = field(default_factory=dict)
     events_by_type: dict[str, int] = field(default_factory=dict)
     alerts: list[Alert] = field(default_factory=list)
-    output_dir: Path | None = None
     annotated_video: Path | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "source": self.source,
             "is_live": self.is_live,
-            "status": self.status,
+            "status": self.status.value,
             "error": self.error,
             "frames_read": self.frames_read,
             "frames_processed": self.frames_processed,
@@ -104,8 +108,7 @@ class VideoPipeline:
         tracker: ObjectTracker,
         event_detector: EventDetector,
         event_processor: EventProcessor,
-        sampler: FrameSampler,
-        privacy_masks: Sequence[Sequence[Point]] = (),
+        privacy_mask: PrivacyMask | None = None,
         annotator: FrameAnnotator | None = None,
         video_writer: AnnotatedVideoWriter | None = None,
         event_log: EventLogWriter | None = None,
@@ -119,8 +122,7 @@ class VideoPipeline:
         self._tracker = tracker
         self._events = event_detector
         self._processor = event_processor
-        self._sampler = sampler
-        self._masks = privacy_masks
+        self._privacy_mask = privacy_mask
         self._annotator = annotator
         self._writer = video_writer
         self._event_log = event_log
@@ -132,86 +134,90 @@ class VideoPipeline:
         self._event_counts: Counter[str] = Counter()
 
     def stop(self) -> None:
+        """Thread-safe; the run finishes the current frame and closes its outputs."""
         self._stop.set()
 
     def run(self) -> RunSummary:
         source = self._source
         summary = RunSummary(source=source.name, is_live=source.is_live)
-        started = time.monotonic()
-        last_progress = started
+        started = last_progress = time.monotonic()
         was_online = True
-        people_now = 0
 
         if not source.is_live:
-            self._emit_system(EventType.PROCESSING_STARTED, 0.0, 0, {"source": source.name})
+            self._emit_system(EventType.PROCESSING_STARTED, details={"source": source.name})
         try:
             while not self._stop.is_set():
                 frame = source.read(timeout_s=1.0)
                 if source.is_live and source.online != was_online:
                     was_online = source.online
-                    kind = EventType.CAMERA_ONLINE if was_online else EventType.CAMERA_OFFLINE
-                    self._emit_system(kind, summary.stream_seconds, summary.frames_read, {})
+                    self._emit_system(
+                        EventType.CAMERA_ONLINE if was_online else EventType.CAMERA_OFFLINE,
+                        stream_time_s=summary.stream_seconds,
+                        frame_index=source.frames_read,
+                    )
                 if frame is None:
                     if source.is_live:
                         continue
                     break  # end of file
 
-                summary.frames_read += 1
                 summary.stream_seconds = frame.timestamp_s
                 if self._max_seconds is not None and frame.timestamp_s >= self._max_seconds:
                     break
-                if not self._sampler.should_process(frame):
-                    continue
-
-                frame.image = apply_privacy_masks(frame.image, self._masks)
-                detections = self._detector.detect(frame.image)
-                tracked = self._tracker.update(detections)
-                analysis = self._events.process(frame, tracked)
-                self._handle_events(analysis)
+                analysis = self._process(frame)
                 summary.frames_processed += 1
-                if analysis.snapshot is not None:
-                    people_now = analysis.snapshot.current_counts.get("person", 0)
-                self._render(analysis)
 
                 now = time.monotonic()
                 if self._on_progress and now - last_progress >= self._progress_interval_s:
                     last_progress = now
-                    elapsed = now - started
                     self._on_progress(PipelineProgress(
-                        frames_read=summary.frames_read,
-                        frames_processed=summary.frames_processed,
+                        frames_read=source.frames_read,
                         total_frames=source.frame_count,
-                        processing_fps=summary.frames_processed / max(elapsed, 1e-6),
-                        elapsed_s=elapsed,
-                        people_now=people_now,
+                        processing_fps=summary.frames_processed / (now - started),
+                        elapsed_s=now - started,
+                        people_now=analysis.snapshot.current_counts["person"],
                     ))
         except Exception as exc:
-            summary.status, summary.error = "FAILED", f"{type(exc).__name__}: {exc}"
+            summary.status, summary.error = RunStatus.FAILED, f"{type(exc).__name__}: {exc}"
             logger.exception("Processing failed")
             if not source.is_live:
-                self._emit_system(EventType.PROCESSING_FAILED, summary.stream_seconds,
-                                  summary.frames_read, {"error": summary.error})
+                self._emit_system(EventType.PROCESSING_FAILED,
+                                  stream_time_s=summary.stream_seconds,
+                                  frame_index=source.frames_read,
+                                  details={"error": summary.error})
         else:
             if self._stop.is_set():
-                summary.status = "CANCELLED" if not source.is_live else "STOPPED"
+                summary.status = RunStatus.STOPPED if source.is_live else RunStatus.CANCELLED
             elif not source.is_live:
-                self._emit_system(EventType.PROCESSING_COMPLETED, summary.stream_seconds,
-                                  summary.frames_read, {"frames": summary.frames_read})
+                self._emit_system(EventType.PROCESSING_COMPLETED,
+                                  stream_time_s=summary.stream_seconds,
+                                  frame_index=source.frames_read,
+                                  details={"frames": source.frames_read})
         finally:
             self._close_outputs()
 
+        summary.frames_read = source.frames_read
         summary.processing_seconds = time.monotonic() - started
         self._fill_summary(summary)
         return summary
 
-    def _handle_events(self, analysis: FrameAnalysis) -> None:
+    def _process(self, frame: Frame) -> FrameAnalysis:
+        if self._privacy_mask is not None:
+            self._privacy_mask.apply(frame.image)
+        tracked = self._tracker.update(self._detector.detect(frame.image))
+        analysis = self._events.process(frame, tracked)
         for event in analysis.events:
-            self._processor.handle(event, analysis.frame.image)
+            self._processor.handle(event, frame.image)
             self._log_event(event)
+        self._render(analysis)
+        return analysis
 
     def _emit_system(
-        self, event_type: EventType, stream_time_s: float, frame_index: int,
-        details: dict[str, Any],
+        self,
+        event_type: EventType,
+        *,
+        stream_time_s: float = 0.0,
+        frame_index: int = 0,
+        details: dict[str, Any] | None = None,
     ) -> None:
         event = self._events.factory.system(
             event_type, stream_time_s=stream_time_s, frame_index=frame_index, details=details
@@ -223,12 +229,11 @@ class VideoPipeline:
         self._event_counts[event.event_type.value] += 1
         if self._event_log is not None:
             self._event_log.write(event.to_dict())
-        if event.event_type not in (EventType.PERSON_DETECTED, EventType.OBJECT_DETECTED):
-            logger.info(
-                "%s: %s", event.event_type.value, event.title,
-                extra={k: v for k, v in (("track", event.track_id), ("zone", event.zone_name),
-                                          ("t", f"{event.stream_time_s:.1f}s")) if v is not None},
-            )
+        if event.event_type not in _QUIET_EVENTS:
+            extra = {"track": event.track_id, "zone": event.zone_name,
+                     "t": f"{event.stream_time_s:.1f}s"}
+            logger.info("%s: %s", event.event_type.value, event.title,
+                        extra={k: v for k, v in extra.items() if v is not None})
 
     def _render(self, analysis: FrameAnalysis) -> None:
         if self._annotator is None or (self._writer is None and not self._display):

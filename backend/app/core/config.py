@@ -29,6 +29,17 @@ class Settings(BaseSettings):
     log_format: Literal["text", "json"] = "text"
     timezone: str = "Asia/Kolkata"
 
+    # PostgreSQL in production, e.g. postgresql://user:password@localhost:5432/ai_video.
+    # The SQLite default needs no setup.
+    database_url: str = "sqlite:///storage/app.db"
+    # With Redis set, uploaded videos are processed by a Celery worker. Without it, the
+    # API processes them on a background thread (one at a time).
+    redis_url: str = ""
+    storage_dir: str = "storage"  # uploaded videos and analysis results
+    scene_config_path: str = "config/scene.yaml"
+    max_upload_mb: int = Field(default=1024, ge=1)
+    cors_origins: str = "http://localhost:3000"  # comma-separated
+
     ai_model_path: str = "models/yolo11n.pt"
     ai_device: str = "auto"  # auto | cpu | cuda | cuda:0 | mps
     ai_confidence_threshold: float = Field(default=0.4, ge=0.05, le=0.99)
@@ -62,6 +73,10 @@ class Settings(BaseSettings):
     @property
     def recipients(self) -> list[str]:
         return [n.strip() for n in self.sms_recipients.split(",") if n.strip()]
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
     def resolve_path(self, value: str | Path) -> Path:
         """Resolve a path from settings relative to the backend directory."""

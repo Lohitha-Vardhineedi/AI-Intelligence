@@ -1,19 +1,17 @@
-"""Builds a ready-to-run analysis pipeline from settings + scene configuration.
-
-This is the single place where concrete implementations are chosen (dependency
-injection). The CLI uses it today; the Celery worker and stream service will reuse it.
-"""
+"""Wires a ready-to-run pipeline from settings and scene config. This is the only place
+that picks concrete implementations; everything else depends on interfaces."""
 
 from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from app.ai.classes import expand_classes
-from app.ai.model_manager import load_detection_model
+from app.ai.detector import YoloDetectionModel, ensure_model_file, resolve_device
 from app.ai.tracker import ByteTrackTracker
 from app.core.config import Settings
 from app.events.detector import EventDetector
@@ -25,7 +23,7 @@ from app.notifications.sms import create_sms_provider
 from app.schemas.scene import SceneConfig
 from app.video.annotator import FrameAnnotator
 from app.video.pipeline import PipelineProgress, VideoPipeline
-from app.video.processor import FrameSampler
+from app.video.privacy import PrivacyMask
 from app.video.sources import VideoSource, create_video_source
 from app.video.writer import AnnotatedVideoWriter, EventLogWriter, SnapshotStore
 
@@ -38,8 +36,10 @@ class AnalysisOptions:
     output_root: Path
     show: bool = False
     save_video: bool = True
-    dry_run: bool = False  # print SMS to the console instead of sending
+    dry_run: bool = False  # print SMS instead of sending them
     max_seconds: float | None = None
+    on_progress: Callable[[PipelineProgress], None] | None = None  # default: log it
+    progress_interval_s: float = 2.0
 
 
 @dataclass(slots=True)
@@ -51,7 +51,7 @@ class AnalysisSession:
     model_version: str
 
     def close(self) -> None:
-        self.notifier.close(wait=True)
+        self.notifier.close(wait=True)  # deliver SMS still in flight
         self.source.close()
 
 
@@ -71,6 +71,25 @@ def _output_dir(root: Path, source: VideoSource) -> Path:
     return path
 
 
+def _load_detector(
+    settings: Settings, scene: SceneConfig, confidence: float, source: VideoSource
+) -> YoloDetectionModel:
+    model_path = ensure_model_file(settings.resolve_path(settings.ai_model_path))
+    device = resolve_device(settings.ai_device)
+    logger.info("Loading detection model %s on %s", model_path.name, device)
+    detector = YoloDetectionModel(
+        model_path,
+        device=device,
+        # The tracker needs the weak detections too; see Settings.ai_tracker_low_threshold.
+        confidence_threshold=min(confidence, settings.ai_tracker_low_threshold),
+        iou_threshold=scene.detection.iou_threshold or settings.ai_iou_threshold,
+        image_size=settings.ai_image_size,
+        classes=expand_classes(scene.detection.classes) or None,
+    )
+    detector.warm_up(source.width or 640, source.height or 480)
+    return detector
+
+
 def build_analysis(
     settings: Settings, scene: SceneConfig, options: AnalysisOptions
 ) -> AnalysisSession:
@@ -82,47 +101,26 @@ def build_analysis(
         default_country_code=settings.sms_default_country_code,
         max_per_hour=settings.sms_max_per_hour,
     )
-    if any(r.enabled and r.actions.sms and not r.recipients for r in scene.rules) and not (
-        notifier.default_recipients
-    ):
+    sms_rules_need_defaults = any(
+        r.enabled and r.actions.sms and not r.recipients for r in scene.rules
+    )
+    if sms_rules_need_defaults and not notifier.default_recipients:
         logger.warning("SMS rules are configured but SMS_RECIPIENTS is empty in .env")
 
-    source = create_video_source(options.source, tz)
+    source = create_video_source(
+        options.source,
+        tz,
+        inference_fps=scene.detection.inference_fps,
+        frame_skip=scene.detection.frame_skip,
+    )
     source.open()
     try:
-        detection = scene.detection
-        confidence = detection.confidence_threshold or settings.ai_confidence_threshold
-        detector = load_detection_model(
-            settings,
-            classes=expand_classes(detection.classes) or None,
-            # ByteTrack needs the low-confidence detections too (see Settings).
-            confidence_threshold=min(confidence, settings.ai_tracker_low_threshold),
-            iou_threshold=detection.iou_threshold or settings.ai_iou_threshold,
-        )
-        sampler = FrameSampler(
-            source.fps,
-            is_live=source.is_live,
-            inference_fps=detection.inference_fps,
-            frame_skip=detection.frame_skip,
-        )
-        tracker = ByteTrackTracker(
-            frame_rate=sampler.effective_fps,
-            high_threshold=confidence,
-            low_threshold=settings.ai_tracker_low_threshold,
-            lost_buffer_seconds=scene.tracking.lost_timeout_seconds,
-        )
-
+        confidence = scene.detection.confidence_threshold or settings.ai_confidence_threshold
+        detector = _load_detector(settings, scene, confidence, source)
         output_dir = _output_dir(options.output_root, source)
-        processor = EventProcessor(
-            rule_engine=RuleEngine(scene.rules, tz),
-            camera=scene.camera,
-            tz=tz,
-            notifier=notifier,
-            snapshots=SnapshotStore(output_dir / "snapshots"),
-        )
         writer = (
             AnnotatedVideoWriter(
-                output_dir / "annotated.mp4", sampler.effective_fps, (source.width, source.height)
+                output_dir / "annotated.mp4", source.effective_fps, (source.width, source.height)
             )
             if options.save_video
             else None
@@ -130,17 +128,28 @@ def build_analysis(
         pipeline = VideoPipeline(
             source=source,
             detector=detector,
-            tracker=tracker,
+            tracker=ByteTrackTracker(
+                frame_rate=source.effective_fps,
+                high_threshold=confidence,
+                low_threshold=settings.ai_tracker_low_threshold,
+                lost_buffer_seconds=scene.tracking.lost_timeout_seconds,
+            ),
             event_detector=EventDetector(scene, tz, confirm_threshold=confidence),
-            event_processor=processor,
-            sampler=sampler,
-            privacy_masks=[m.points for m in scene.privacy_masks],
+            event_processor=EventProcessor(
+                rule_engine=RuleEngine(scene.rules, tz),
+                camera=scene.camera,
+                tz=tz,
+                notifier=notifier,
+                snapshots=SnapshotStore(output_dir / "snapshots"),
+            ),
+            privacy_mask=PrivacyMask([m.points for m in scene.privacy_masks]),
             annotator=FrameAnnotator(scene, tz) if (options.save_video or options.show) else None,
             video_writer=writer,
             event_log=EventLogWriter(output_dir / "events.jsonl"),
             display=options.show,
             max_seconds=options.max_seconds,
-            on_progress=_log_progress,
+            on_progress=options.on_progress or _log_progress,
+            progress_interval_s=options.progress_interval_s,
         )
     except Exception:
         source.close()
@@ -149,7 +158,7 @@ def build_analysis(
 
     logger.info(
         "Analysing %s (%dx%d @ %.1f fps) - inference at %.1f fps, SMS provider: %s",
-        source.name, source.width, source.height, source.fps, sampler.effective_fps,
+        source.name, source.width, source.height, source.fps, source.effective_fps,
         notifier.provider_name,
     )
     return AnalysisSession(pipeline, source, notifier, output_dir, detector.model_version)

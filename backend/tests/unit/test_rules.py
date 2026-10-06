@@ -40,7 +40,7 @@ def test_schedule_supports_overnight_windows():
 @pytest.fixture
 def processing():
     provider = FakeSMSProvider()
-    notifier = NotificationManager(provider, ["9381558756"], sleep=lambda _: None)
+    notifier = NotificationManager(provider, ["9876543210"], sleep=lambda _: None)
     config = scene()
     processor = EventProcessor(rule_engine=RuleEngine(config.rules, UTC), camera=config.camera,
                                tz=UTC, notifier=notifier)
@@ -57,7 +57,7 @@ def test_twenty_intrusions_within_cooldown_send_one_sms(processing):
     assert processor.alerts[0].occurrence_count == 20
     assert len(provider.sent) == 1
     number, message = provider.sent[0]
-    assert number == "+919381558756"
+    assert number == "+919876543210"
     assert "Severity: CRITICAL" in message
     assert "Event: Unauthorized Person Entry" in message
 

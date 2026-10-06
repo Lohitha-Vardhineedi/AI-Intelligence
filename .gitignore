@@ -9,21 +9,22 @@ __pycache__/
 .venv/
 .pytest_cache/
 .ruff_cache/
-.mypy_cache/
 
-# Runtime data and large files
+# Models, sample data, uploads and run outputs (downloaded or generated)
 backend/models/
 backend/data/
 backend/output/
+backend/storage/
 *.pt
 *.onnx
 *.mp4
 *.avi
-frame_preview.jpg
 
-# Node / frontend (later)
+# Frontend
 node_modules/
 .next/
+next-env.d.ts
+*.tsbuildinfo
 
 # OS / editors
 .DS_Store

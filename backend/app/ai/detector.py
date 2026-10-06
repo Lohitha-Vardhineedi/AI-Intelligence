@@ -41,7 +41,6 @@ class YoloDetectionModel:
             "iou": iou_threshold,
             "imgsz": image_size,
             "device": device,
-            "half": device.startswith("cuda"),
             "classes": self._class_ids(classes),
             "verbose": False,
         }

@@ -23,18 +23,18 @@ from app.schemas.scene import SceneConfig
 class SceneSnapshot:
     """Scene state after a frame, for the overlay."""
 
-    tracks: list[TrackState]
-    current_counts: Counter[str]
-    unique_counts: dict[str, int]
-    zone_occupancy: dict[str, int]
-    line_counts: dict[str, tuple[int, int]]  # line id -> (IN, OUT)
+    tracks: list[TrackState] = field(default_factory=list)
+    current_counts: Counter[str] = field(default_factory=Counter)
+    unique_counts: dict[str, int] = field(default_factory=dict)
+    zone_occupancy: dict[str, int] = field(default_factory=dict)
+    line_counts: dict[str, tuple[int, int]] = field(default_factory=dict)  # id -> (IN, OUT)
 
 
 @dataclass(slots=True)
 class FrameAnalysis:
     frame: Frame
+    snapshot: SceneSnapshot
     events: list[Event] = field(default_factory=list)
-    snapshot: SceneSnapshot | None = None
 
 
 class EventDetector:
@@ -75,7 +75,7 @@ class EventDetector:
         events = self.counter.process(frame, update)
         for detector in (*self.lines, *self.zones, *self.thresholds):
             events += detector.process(frame, update)
-        return FrameAnalysis(frame=frame, events=events, snapshot=self._snapshot(update.active))
+        return FrameAnalysis(frame=frame, snapshot=self._snapshot(update.active), events=events)
 
     def _snapshot(self, active: list[TrackState]) -> SceneSnapshot:
         return SceneSnapshot(
