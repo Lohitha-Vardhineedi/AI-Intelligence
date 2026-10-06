@@ -61,8 +61,6 @@ def test_annotator_tints_zones_only_and_leaves_the_input_untouched():
     assert out[600, 800].any()  # inside the room zone (x > 0.5)
     assert not out[600, 300].any()  # outside it, below the HUD
     assert not image.any()
-
-
 def test_annotated_writer_produces_a_readable_video(tmp_path):
     path = tmp_path / "annotated.mp4"
     writer = AnnotatedVideoWriter(path, 10, (64, 48))
