@@ -13,7 +13,7 @@ from typing import Any
 
 from app.core.config import get_settings
 from app.core.database import sync_session_factory
-from app.models import EventRecord, JobStatus, VideoProcessingJob
+from app.models import EventRecord, JobStatus, Video, VideoProcessingJob
 from app.models.base import utcnow
 from app.schemas.scene import load_scene_config
 from app.services.video_analysis import AnalysisOptions, AnalysisSession, build_analysis
@@ -113,6 +113,20 @@ def fail_interrupted_jobs() -> int:
             job.completed_at = utcnow()
         db.commit()
         return len(jobs)
+
+
+def forget_missing_videos() -> int:
+    """Deletes the records of videos whose files are gone. Hosts without persistent storage
+    (such as Render's free plan) lose uploaded files on every restart."""
+    storage = get_storage()
+    with sync_session_factory()() as db:
+        missing = [v for v in db.query(Video).all() if not storage.path(v.storage_key).exists()]
+        for video in missing:
+            for job in video.jobs:
+                storage.delete(f"jobs/{job.id}")
+            db.delete(video)
+        db.commit()
+        return len(missing)
 
 
 def _fail(job_id: str, message: str) -> None:

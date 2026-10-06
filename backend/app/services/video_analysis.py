@@ -10,8 +10,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+import cv2
+
 from app.ai.classes import expand_classes
-from app.ai.detector import YoloDetectionModel, ensure_model_file, resolve_device
+from app.ai.detector import OnnxDetectionModel, YoloDetectionModel, load_detection_model
 from app.ai.tracker import ByteTrackTracker
 from app.core.config import Settings
 from app.events.detector import EventDetector
@@ -73,18 +75,18 @@ def _output_dir(root: Path, source: VideoSource) -> Path:
 
 def _load_detector(
     settings: Settings, scene: SceneConfig, confidence: float, source: VideoSource
-) -> YoloDetectionModel:
-    model_path = ensure_model_file(settings.resolve_path(settings.ai_model_path))
-    device = resolve_device(settings.ai_device)
-    logger.info("Loading detection model %s on %s", model_path.name, device)
-    detector = YoloDetectionModel(
-        model_path,
-        device=device,
+) -> YoloDetectionModel | OnnxDetectionModel:
+    if settings.ai_cpu_threads:
+        cv2.setNumThreads(settings.ai_cpu_threads)
+    detector = load_detection_model(
+        settings.resolve_path(settings.ai_model_path),
+        device=settings.ai_device,
         # The tracker needs the weak detections too; see Settings.ai_tracker_low_threshold.
         confidence_threshold=min(confidence, settings.ai_tracker_low_threshold),
         iou_threshold=scene.detection.iou_threshold or settings.ai_iou_threshold,
         image_size=settings.ai_image_size,
         classes=expand_classes(scene.detection.classes) or None,
+        threads=settings.ai_cpu_threads,
     )
     detector.warm_up(source.width or 640, source.height or 480)
     return detector
@@ -110,7 +112,7 @@ def build_analysis(
     source = create_video_source(
         options.source,
         tz,
-        inference_fps=scene.detection.inference_fps,
+        inference_fps=settings.ai_inference_fps or scene.detection.inference_fps,
         frame_skip=scene.detection.frame_skip,
     )
     source.open()
@@ -120,7 +122,10 @@ def build_analysis(
         output_dir = _output_dir(options.output_root, source)
         writer = (
             AnnotatedVideoWriter(
-                output_dir / "annotated.mp4", source.effective_fps, (source.width, source.height)
+                output_dir / "annotated.mp4",
+                source.effective_fps,
+                (source.width, source.height),
+                threads=settings.ai_cpu_threads,
             )
             if options.save_video
             else None

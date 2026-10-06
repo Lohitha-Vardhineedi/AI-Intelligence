@@ -123,3 +123,11 @@ def test_progress_is_saved_and_a_cancel_request_stops_the_pipeline(queued_job, s
 
     reporter(progress)
     assert pipeline.stopped
+
+
+def test_videos_whose_files_are_gone_are_forgotten(queued_job, sync_sessions):
+    # The fixture's video has no file in storage, as after a restart on a temporary disk.
+    assert video_jobs.forget_missing_videos() == 1
+
+    with sync_sessions() as db:
+        assert db.get(VideoProcessingJob, queued_job) is None

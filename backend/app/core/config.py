@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     # API processes them on a background thread (one at a time).
     redis_url: str = ""
     storage_dir: str = "storage"  # uploaded videos and analysis results
+    # On hosts whose disk is wiped on restart, delete records of videos whose files are gone.
+    forget_missing_videos: bool = False
     scene_config_path: str = "config/scene.yaml"
     max_upload_mb: int = Field(default=1024, ge=1)
     cors_origins: str = "http://localhost:3000"  # comma-separated
@@ -48,6 +50,12 @@ class Settings(BaseSettings):
     # ByteTrack uses weak detections to keep existing tracks alive (never to start new
     # ones), so the detector itself runs at this lower threshold.
     ai_tracker_low_threshold: float = Field(default=0.1, ge=0.01, le=0.9)
+    # CPU threads for inference and video encoding. 0 = the libraries' default (all
+    # cores). Set 1 on servers with a fraction of a CPU, where more threads only add overhead.
+    ai_cpu_threads: int = Field(default=0, ge=0, le=64)
+    # Overrides detection.inference_fps in the scene config, e.g. to analyse fewer frames
+    # per second on a small server.
+    ai_inference_fps: float | None = Field(default=None, gt=0, le=60)
 
     sms_provider: SmsProviderName = "console"
     sms_recipients: str = ""  # comma-separated

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -15,36 +17,77 @@ from app.events.types import Event
 
 logger = logging.getLogger(__name__)
 
-# H.264 plays in browsers; MPEG-4 Part 2 is the fallback. pip builds of OpenCV can't
-# encode H.264 through FFmpeg, but Windows has an encoder built in (Media Foundation).
-_WRITER_BACKENDS = (
+# Browsers play H.264. pip builds of OpenCV can't encode it, so the writer uses the ffmpeg
+# command when it is installed (Linux servers, the Docker image). Otherwise it uses
+# Windows' built-in encoder (Media Foundation), then MPEG-4 Part 2 as a last resort.
+_OPENCV_BACKENDS = (
     ((cv2.CAP_MSMF, "avc1"),) if sys.platform == "win32" else ()
 ) + ((cv2.CAP_FFMPEG, "avc1"), (cv2.CAP_FFMPEG, "mp4v"))
 
 
 class AnnotatedVideoWriter:
-    def __init__(self, path: Path, fps: float, size: tuple[int, int]) -> None:
+    def __init__(self, path: Path, fps: float, size: tuple[int, int], *, threads: int = 0) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
+        self._ffmpeg: subprocess.Popen[bytes] | None = None
         self._writer: cv2.VideoWriter | None = None
-        for backend, codec in _WRITER_BACKENDS:
+        if ffmpeg := shutil.which("ffmpeg"):
+            self._ffmpeg = _start_ffmpeg(ffmpeg, path, fps, size, threads)
+            logger.info("Writing annotated video %s (ffmpeg, H.264)", path.name)
+            return
+        for backend, codec in _OPENCV_BACKENDS:
             writer = cv2.VideoWriter(str(path), backend, cv2.VideoWriter_fourcc(*codec), fps, size)
             if writer.isOpened():
                 self._writer = writer
                 logger.info("Writing annotated video %s (codec %s)", path.name, codec)
-                break
+                return
             writer.release()
-        if self._writer is None:
-            raise RuntimeError(f"Could not create a video writer for {path}")
+        raise RuntimeError(f"Could not create a video writer for {path}")
 
     def write(self, image: np.ndarray) -> None:
-        if self._writer is not None:
+        if self._ffmpeg is not None and self._ffmpeg.stdin is not None:
+            try:
+                self._ffmpeg.stdin.write(np.ascontiguousarray(image).data)
+            except BrokenPipeError as exc:
+                raise RuntimeError(f"ffmpeg stopped: {self._ffmpeg_errors()}") from exc
+        elif self._writer is not None:
             self._writer.write(image)
 
     def close(self) -> None:
+        if self._ffmpeg is not None:
+            if self._ffmpeg.stdin is not None:
+                self._ffmpeg.stdin.close()
+            if self._ffmpeg.wait(timeout=120) != 0:
+                logger.error("ffmpeg failed: %s", self._ffmpeg_errors())
+            self._ffmpeg = None
         if self._writer is not None:
             self._writer.release()
             self._writer = None
+
+    def _ffmpeg_errors(self) -> str:
+        if self._ffmpeg is None or self._ffmpeg.stderr is None:
+            return ""
+        return self._ffmpeg.stderr.read().decode(errors="replace").strip()[-500:]
+
+
+def _start_ffmpeg(
+    ffmpeg: str, path: Path, fps: float, size: tuple[int, int], threads: int
+) -> subprocess.Popen[bytes]:
+    width, height = size
+    command = [
+        ffmpeg, "-loglevel", "error", "-y",
+        # Input: raw BGR frames on stdin, exactly as OpenCV holds them.
+        "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{width}x{height}", "-r", f"{fps:g}",
+        "-i", "-",
+        # Output: H.264 MP4 that starts playing before it has fully downloaded.
+        "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",  # yuv420p needs even dimensions
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+    ]
+    if threads:
+        command += ["-threads", str(threads)]
+    command.append(str(path))
+    return subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
 class SnapshotStore:
